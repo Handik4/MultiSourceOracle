@@ -1,0 +1,9 @@
+# Tooling for developing and testing the MultiSourceOracle intelligent contract.
+# Install with:  pip install -r requirements.txt
+#
+# genlayer-test bundles the pytest plugins used for direct-mode and integration
+# tests (the `direct_vm`, `direct_deploy`, `direct_alice`, ... fixtures).
+# genvm-linter provides the `genvm-lint` CLI (check / typecheck / schema).
+genlayer-test>=0.29.0
+genvm-linter>=0.10.0
+pytest>=8.0.0

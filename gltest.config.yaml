@@ -1,0 +1,22 @@
+# gltest configuration for the MultiSourceOracle project.
+#
+# StudioNet is selected as the default network for deploy/integration runs.
+# Fast, in-memory direct-mode unit tests do not require any network and ignore
+# this file entirely; it matters only when running integration tests or the
+# GenLayer CLI against a live environment.
+
+networks:
+  default: studionet
+
+  studionet:
+    # Preconfigured network: RPC URL, chain id and defaults are supplied by the
+    # gltest built-in chain definitions. Only overrides need to appear here.
+    leader_only: false
+    default_wait_interval: 3000
+    default_wait_retries: 50
+
+paths:
+  contracts: contracts
+  artifacts: artifacts
+
+environment: .env
