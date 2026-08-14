@@ -1,0 +1,8 @@
+{
+  "contract": "MultiSourceEquivalenceOracle",
+  "network": "StudioNet",
+  "chainId": 61999,
+  "rpcUrl": "https://studio.genlayer.com/api",
+  "address": "0x7bd95350C6FBbE2Ae9505306B767c6F7AD66E834",
+  "explorer": "https://explorer-studio.genlayer.com/address/0x7bd95350C6FBbE2Ae9505306B767c6F7AD66E834"
+}

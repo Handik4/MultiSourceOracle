@@ -18,13 +18,16 @@ patterns that every serious GenLayer oracle needs:
 
 ---
 
-## Live deployment
+## Deployment
 
 | Field | Value |
 |-------|-------|
 | Network | GenLayer StudioNet (Chain `61999`) |
-| Contract address | `0x5F356A82816f988F59f0824E2F0179Fb4a8fd8CD` |
-| Explorer | https://explorer-studio.genlayer.com/address/0x5F356A82816f988F59f0824E2F0179Fb4a8fd8CD |
+| Contract address | `0x7bd95350C6FBbE2Ae9505306B767c6F7AD66E834` |
+| Explorer | https://explorer-studio.genlayer.com/address/0x7bd95350C6FBbE2Ae9505306B767c6F7AD66E834 |
+
+Machine-readable deployment metadata is recorded in
+[`deployments/studionet.json`](deployments/studionet.json).
 
 > Deploy note: the `# { "Depends": ... }` runner directive on line 1 must be
 > immediately followed by code. A run of `#` comment lines directly beneath it is
