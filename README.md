@@ -226,7 +226,9 @@ MultiSourceOracle/
 ├── contracts/
 │   └── multi_source_oracle.py      # the intelligent contract
 ├── tests/
-│   └── test_multi_source_oracle.py # 17 direct-mode unit tests
+│   ├── test_multi_source_oracle.py # 17 direct-mode unit tests
+│   └── integration/
+│       └── test_studionet.py       # 4 live-consensus integration tests
 ├── gltest.config.yaml              # StudioNet default network config
 ├── pytest.ini                      # test discovery + plugin hygiene
 ├── requirements.txt                # genlayer-test, genvm-linter, pytest
@@ -259,7 +261,18 @@ gltest
 python -m pytest tests/ -v
 ```
 
-Expected result: **17 passed**.
+Expected result: **17 passed** (plus 4 integration tests deselected).
+
+Run the live-consensus integration suite against StudioNet (deploys the contract
+and exercises it under full leader + validator consensus):
+
+```bash
+gltest tests/integration/ -v -s -m integration --network studionet
+```
+
+Expected result: **4 passed**. These cover the deterministic surface (trust-model
+view, sha256 fencing, domain allowlist, request state machine) that every
+validator reproduces exactly.
 
 ---
 
