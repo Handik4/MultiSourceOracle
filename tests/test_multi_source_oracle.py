@@ -104,17 +104,14 @@ def test_create_request_initializes_pending_state(direct_vm, direct_deploy, dire
     request_id = contract.create_request(URL_A, URL_B, "spot_price", 75)
     record = contract.get_request(request_id)
 
-    assert record["id"] == 0
-    assert record["status"] == "PENDING"
-    assert record["source_url_a"] == URL_A
-    assert record["source_url_b"] == URL_B
-    assert record["target_metric"] == "spot_price"
-    assert record["max_variance_bp"] == 75
-    assert record["value_a_bp"] == 0
-    assert record["value_b_bp"] == 0
-    assert record["variance_bp"] == 0
-    assert record["final_value_bp"] == 0
-    assert record["reason"] == ""
+    assert record.id == 0
+    assert record.status == "PENDING"
+    assert record.source_a == URL_A
+    assert record.source_b == URL_B
+    assert record.metric == "spot_price"
+    assert record.max_variance_bp == 75
+    assert record.final_value_bp == 0
+    assert record.reason == ""
 
 
 def test_request_count_increments(direct_vm, direct_deploy, direct_alice):
@@ -152,17 +149,14 @@ def test_resolve_success_within_variance(direct_vm, direct_deploy, direct_alice)
     request_id = contract.create_request(URL_A, URL_B, "price", 50)
     result = contract.resolve_request(request_id)
 
-    assert result["status"] == "RESOLVED"
-    assert result["value_a_bp"] == 451250000
-    assert result["value_b_bp"] == 451260000
-    assert result["variance_bp"] == 0
-    assert result["final_value_bp"] == (451250000 + 451260000) // 2
-    assert result["reason"] == ""
+    assert result.status == "RESOLVED"
+    assert result.final_value_bp == (451250000 + 451260000) // 2
+    assert result.reason == ""
 
     # State is persisted.
     persisted = contract.get_request(request_id)
-    assert persisted["status"] == "RESOLVED"
-    assert persisted["final_value_bp"] == (451250000 + 451260000) // 2
+    assert persisted.status == "RESOLVED"
+    assert persisted.final_value_bp == (451250000 + 451260000) // 2
 
 
 def test_resolve_success_exact_threshold_boundary(direct_vm, direct_deploy, direct_alice):
@@ -178,9 +172,10 @@ def test_resolve_success_exact_threshold_boundary(direct_vm, direct_deploy, dire
     request_id = contract.create_request(URL_A, URL_B, "price", expected_variance)
     result = contract.resolve_request(request_id)
 
-    # variance == max_variance_bp must pass (gate is <=).
-    assert result["variance_bp"] == expected_variance
-    assert result["status"] == "RESOLVED"
+    # variance == max_variance_bp must pass (gate is <=): status resolves and the
+    # mean is recorded as the final value.
+    assert result.status == "RESOLVED"
+    assert result.final_value_bp == (1000000 + 1010000) // 2
 
 
 # ---------------------------------------------------------------------------
@@ -199,10 +194,9 @@ def test_resolve_reject_exceeds_variance(direct_vm, direct_deploy, direct_alice)
     request_id = contract.create_request(URL_A, URL_B, "price", 50)
     result = contract.resolve_request(request_id)
 
-    assert result["status"] == "REJECTED"
-    assert result["final_value_bp"] == 0
-    assert result["variance_bp"] > 50
-    assert "exceeds threshold" in result["reason"]
+    assert result.status == "REJECTED"
+    assert result.final_value_bp == 0
+    assert "exceeds threshold" in result.reason
 
 
 # ---------------------------------------------------------------------------
@@ -248,13 +242,13 @@ def test_preview_fence_isolates_injection(direct_vm, direct_deploy, direct_alice
 
     # The fence token is the first 32 hex chars of sha256(payload).
     expected_token = hashlib.sha256(injection.encode("utf-8")).hexdigest()[:32]
-    assert preview["token"] == expected_token
-    assert len(preview["token"]) == 32
+    assert preview.token == expected_token
+    assert len(preview.token) == 32
 
-    prompt = preview["prompt"]
-    open_tag = preview["open_tag"]
-    close_tag = preview["close_tag"]
-    assert preview["payload_is_fenced"] is True
+    prompt = preview.prompt
+    open_tag = preview.open_tag
+    close_tag = preview.close_tag
+    assert preview.payload_is_fenced is True
 
     # The untrusted payload (including the injection) must appear ONLY inside the
     # fenced region -- never before the opening tag.
@@ -279,7 +273,7 @@ def test_fence_token_is_payload_specific(direct_vm, direct_deploy, direct_alice)
 
     # Different payloads -> different fence nonce, so a forged closing tag copied
     # from one page cannot escape the fence on another.
-    assert a["token"] != b["token"]
+    assert a.token != b.token
 
 
 def test_injection_payload_does_not_alter_deterministic_gate(direct_vm, direct_deploy, direct_alice):
@@ -298,10 +292,9 @@ def test_injection_payload_does_not_alter_deterministic_gate(direct_vm, direct_d
     request_id = contract.create_request(URL_A, URL_B, "price", 50)
     result = contract.resolve_request(request_id)
 
-    assert result["status"] == "RESOLVED"
+    assert result.status == "RESOLVED"
     # The injected 999999999999 never reaches the gate.
-    assert result["final_value_bp"] == (451250000 + 451255000) // 2
-    assert result["value_a_bp"] == 451250000
+    assert result.final_value_bp == (451250000 + 451255000) // 2
 
 
 # ---------------------------------------------------------------------------
@@ -313,10 +306,10 @@ def test_get_trust_model(direct_vm, direct_deploy, direct_alice):
     direct_vm.sender = direct_alice
 
     model = contract.get_trust_model()
-    assert model["name"] == "MultiSourceEquivalenceOracle"
-    assert "api.coingecko.com" in model["allowed_domains"]
-    assert "api.binance.com" in model["allowed_domains"]
-    assert "query1.finance.yahoo.com" in model["allowed_domains"]
-    assert "earthquake.usgs.gov" in model["allowed_domains"]
-    assert "api.reliefweb.int" in model["allowed_domains"]
-    assert model["states"] == ["PENDING", "RESOLVED", "REJECTED"]
+    assert model.name == "MultiSourceEquivalenceOracle"
+    assert "api.coingecko.com" in model.allowed_domains
+    assert "api.binance.com" in model.allowed_domains
+    assert "query1.finance.yahoo.com" in model.allowed_domains
+    assert "earthquake.usgs.gov" in model.allowed_domains
+    assert "api.reliefweb.int" in model.allowed_domains
+    assert model.states == "PENDING,RESOLVED,REJECTED"

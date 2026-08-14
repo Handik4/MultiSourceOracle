@@ -1,7 +1,19 @@
 # { "Depends": "py-genlayer:1jb45aa8ynh2a9c9xn3b7qqh8sm5q93hwfp7jqmwsfhh8jpz09h6" }
-#
+
+from genlayer import *
+
+import json
+import hashlib
+from dataclasses import dataclass
+
 # MultiSourceEquivalenceOracle
 # ============================
+#
+# NOTE ON THIS HEADER: the `# { "Depends": ... }` runner directive on line 1 MUST
+# be followed immediately by code. The GenVM runner parser treats the unbroken run
+# of comment lines directly beneath the directive as part of the runner spec, so a
+# descriptive `#` comment block placed there makes on-chain schema generation fail
+# with `invalid_contract`. This explanatory block therefore lives BELOW the imports.
 #
 # An educational GenLayer Intelligent Contract that resolves a numeric metric by
 # cross-checking TWO independent, allowlisted web sources through an LLM and then
@@ -37,12 +49,6 @@
 #
 # The whole file is 100% clean ASCII English. No non-ASCII characters appear in
 # code, comments, or docstrings.
-
-from genlayer import *
-
-import json
-import hashlib
-from dataclasses import dataclass
 
 
 # ---------------------------------------------------------------------------
@@ -253,7 +259,14 @@ def _integer_variance_bp(value_a: int, value_b: int) -> int:
 
 
 # ---------------------------------------------------------------------------
-# Storage record
+# Typed records
+#
+# Public methods must NEVER be annotated with a bare `dict`: the on-chain schema
+# generator (`gen_getContractSchemaForCode`) cannot describe an untyped mapping
+# and rejects the contract with `invalid_contract`. Instead every structured
+# value crossing the ABI boundary is a proper GenLayer dataclass, which the
+# schema generator renders as an explicit field -> type struct. These dataclasses
+# double as storage records and as return values.
 # ---------------------------------------------------------------------------
 
 @allow_storage
@@ -261,21 +274,48 @@ def _integer_variance_bp(value_a: int, value_b: int) -> int:
 class OracleRequest:
     """One cross-source resolution request.
 
-    This dataclass is the lint-clean, deploy-safe equivalent of an "id -> request
-    dict" mapping: GenLayer storage cannot hold a raw Python ``dict`` as a value
-    type, so a typed record is used and the views project it back into a dict.
+    Used both as the value type of the `requests` TreeMap and as the typed return
+    value of `get_request` / `resolve_request`. Every field is a storage- and
+    ABI-compatible type (u256, str, Address); there is no untyped `dict` anywhere
+    in the public interface.
     """
 
-    source_url_a: str
-    source_url_b: str
-    target_metric: str
+    id: u256
+    source_a: str
+    source_b: str
+    metric: str
     max_variance_bp: u256
-    status: str
-    value_a_bp: u256
-    value_b_bp: u256
-    variance_bp: u256
     final_value_bp: u256
+    status: str
     reason: str
+    requester: Address
+
+
+@allow_storage
+@dataclass
+class TrustModel:
+    """Typed description of the oracle's trust and security posture."""
+
+    name: str
+    owner: str
+    allowed_domains: str      # comma-separated (ABI has no bare list-of-str here)
+    normalization: str
+    equivalence_rule: str
+    prompt_fencing: str
+    validator_tolerance_bp: u256
+    states: str               # comma-separated lifecycle states
+
+
+@allow_storage
+@dataclass
+class FencePreview:
+    """Typed preview of how an untrusted payload is fenced for the LLM."""
+
+    token: str
+    open_tag: str
+    close_tag: str
+    prompt: str
+    payload_is_fenced: bool
 
 
 # ---------------------------------------------------------------------------
@@ -323,36 +363,36 @@ class MultiSourceEquivalenceOracle(gl.Contract):
 
         request_id = self.request_count
         self.requests[request_id] = OracleRequest(
-            source_url_a=source_url_a,
-            source_url_b=source_url_b,
-            target_metric=target_metric,
+            id=request_id,
+            source_a=source_url_a,
+            source_b=source_url_b,
+            metric=target_metric,
             max_variance_bp=max_variance_bp,
-            status=STATUS_PENDING,
-            value_a_bp=u256(0),
-            value_b_bp=u256(0),
-            variance_bp=u256(0),
             final_value_bp=u256(0),
+            status=STATUS_PENDING,
             reason="",
+            requester=gl.message.sender_address,
         )
         self.request_count = u256(int(request_id) + 1)
         return request_id
 
     @gl.public.write
-    def resolve_request(self, request_id: u256) -> dict:
+    def resolve_request(self, request_id: u256) -> OracleRequest:
         """Resolve a PENDING request by cross-checking both sources.
 
         STATE BINDING: every value read out of storage happens here, up front,
         into local variables. The non-deterministic fetch/LLM work below closes
-        over ONLY these locals, never over ``self`` or contract storage.
+        over ONLY these locals, never over ``self`` or contract storage. Returns
+        the updated, typed `OracleRequest` record.
         """
         if request_id not in self.requests:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Unknown request id: {int(request_id)}")
 
         record = self.requests[request_id]
         # --- STATE BINDING: snapshot storage into locals before any nondet. ---
-        url_a = str(record.source_url_a)
-        url_b = str(record.source_url_b)
-        target_metric = str(record.target_metric)
+        url_a = str(record.source_a)
+        url_b = str(record.source_b)
+        target_metric = str(record.metric)
         max_variance_bp = int(record.max_variance_bp)
         status = str(record.status)
 
@@ -370,10 +410,6 @@ class MultiSourceEquivalenceOracle(gl.Contract):
         variance_bp = _integer_variance_bp(value_a_bp, value_b_bp)
         final_value_bp = (value_a_bp + value_b_bp) // 2
 
-        record.value_a_bp = u256(value_a_bp)
-        record.value_b_bp = u256(value_b_bp)
-        record.variance_bp = u256(variance_bp)
-
         if variance_bp <= max_variance_bp:
             record.status = STATUS_RESOLVED
             record.final_value_bp = u256(final_value_bp)
@@ -386,33 +422,33 @@ class MultiSourceEquivalenceOracle(gl.Contract):
                 + str(max_variance_bp) + " bp"
             )
 
-        return _request_to_dict(request_id, record)
+        return record
 
     # -- View methods -------------------------------------------------------
 
     @gl.public.view
-    def get_request(self, request_id: u256) -> dict:
-        """Return a request record as a plain dict, or an error if unknown."""
+    def get_request(self, request_id: u256) -> OracleRequest:
+        """Return the typed request record, or raise if the id is unknown."""
         if request_id not in self.requests:
             raise gl.vm.UserError(f"{ERROR_EXPECTED} Unknown request id: {int(request_id)}")
-        return _request_to_dict(request_id, self.requests[request_id])
+        return self.requests[request_id]
 
     @gl.public.view
-    def get_trust_model(self) -> dict:
+    def get_trust_model(self) -> TrustModel:
         """Describe the oracle's trust and security posture for integrators."""
-        return {
-            "name": "MultiSourceEquivalenceOracle",
-            "owner": self.owner.as_hex,
-            "allowed_domains": list(ALLOWED_DOMAINS),
-            "normalization": "integer basis points (value * 10000, no floats)",
-            "equivalence_rule": "abs(a-b)*10000//avg <= max_variance_bp",
-            "prompt_fencing": "dynamic sha256[:32] fence tags around untrusted payloads",
-            "validator_tolerance_bp": VALIDATOR_TOLERANCE_BP,
-            "states": [STATUS_PENDING, STATUS_RESOLVED, STATUS_REJECTED],
-        }
+        return TrustModel(
+            name="MultiSourceEquivalenceOracle",
+            owner=self.owner.as_hex,
+            allowed_domains=",".join(ALLOWED_DOMAINS),
+            normalization="integer basis points (value * 10000, no floats)",
+            equivalence_rule="abs(a-b)*10000//avg <= max_variance_bp",
+            prompt_fencing="dynamic sha256[:32] fence tags around untrusted payloads",
+            validator_tolerance_bp=u256(VALIDATOR_TOLERANCE_BP),
+            states=",".join([STATUS_PENDING, STATUS_RESOLVED, STATUS_REJECTED]),
+        )
 
     @gl.public.view
-    def preview_fence(self, raw_payload: str, target_metric: str) -> dict:
+    def preview_fence(self, raw_payload: str, target_metric: str) -> FencePreview:
         """Deterministically preview how a payload would be fenced.
 
         Exposed for education and testing: it lets callers verify that untrusted
@@ -423,13 +459,13 @@ class MultiSourceEquivalenceOracle(gl.Contract):
         prompt = _build_fenced_prompt(raw_payload, target_metric, token)
         open_tag = "<fence sha256=" + token + ">"
         close_tag = "</fence sha256=" + token + ">"
-        return {
-            "token": token,
-            "open_tag": open_tag,
-            "close_tag": close_tag,
-            "prompt": prompt,
-            "payload_is_fenced": (open_tag in prompt) and (close_tag in prompt),
-        }
+        return FencePreview(
+            token=token,
+            open_tag=open_tag,
+            close_tag=close_tag,
+            prompt=prompt,
+            payload_is_fenced=(open_tag in prompt) and (close_tag in prompt),
+        )
 
 
 # ---------------------------------------------------------------------------
@@ -496,20 +532,3 @@ def _resolve_metric_bp(url: str, target_metric: str) -> int:
         return abs(int(leader_value) - int(validator_value)) <= VALIDATOR_TOLERANCE_BP
 
     return gl.vm.run_nondet_unsafe(leader_fn, validator_fn)
-
-
-def _request_to_dict(request_id: u256, record: OracleRequest) -> dict:
-    """Project a stored OracleRequest into a plain, ABI-friendly dict."""
-    return {
-        "id": int(request_id),
-        "source_url_a": str(record.source_url_a),
-        "source_url_b": str(record.source_url_b),
-        "target_metric": str(record.target_metric),
-        "max_variance_bp": int(record.max_variance_bp),
-        "status": str(record.status),
-        "value_a_bp": int(record.value_a_bp),
-        "value_b_bp": int(record.value_b_bp),
-        "variance_bp": int(record.variance_bp),
-        "final_value_bp": int(record.final_value_bp),
-        "reason": str(record.reason),
-    }

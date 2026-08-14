@@ -18,6 +18,22 @@ patterns that every serious GenLayer oracle needs:
 
 ---
 
+## Live deployment
+
+| Field | Value |
+|-------|-------|
+| Network | GenLayer StudioNet (Chain `61999`) |
+| Contract address | `0x5F356A82816f988F59f0824E2F0179Fb4a8fd8CD` |
+| Explorer | https://explorer-studio.genlayer.com/address/0x5F356A82816f988F59f0824E2F0179Fb4a8fd8CD |
+
+> Deploy note: the `# { "Depends": ... }` runner directive on line 1 must be
+> immediately followed by code. A run of `#` comment lines directly beneath it is
+> parsed as part of the runner spec and makes on-chain schema generation fail with
+> `invalid_contract` — which is why the descriptive header block lives *below* the
+> imports in `contracts/multi_source_oracle.py`.
+
+---
+
 ## Contract at a glance
 
 `contracts/multi_source_oracle.py` implements `MultiSourceEquivalenceOracle`.
@@ -26,10 +42,10 @@ patterns that every serious GenLayer oracle needs:
 |------|-------|
 | State | `request_count: u256`, `requests: TreeMap[u256, OracleRequest]`, `owner: Address` |
 | Write | `create_request(source_url_a, source_url_b, target_metric, max_variance_bp) -> u256` |
-| Write | `resolve_request(request_id) -> dict` |
-| View | `get_request(request_id) -> dict` |
-| View | `get_trust_model() -> dict` |
-| View | `preview_fence(raw_payload, target_metric) -> dict` |
+| Write | `resolve_request(request_id) -> OracleRequest` |
+| View | `get_request(request_id) -> OracleRequest` |
+| View | `get_trust_model() -> TrustModel` |
+| View | `preview_fence(raw_payload, target_metric) -> FencePreview` |
 
 ### Lifecycle
 
@@ -177,15 +193,26 @@ compares the full host, not a suffix.
 
 ---
 
-## A note on storage typing (`dict` vs dataclass)
+## A note on typing (`dict` vs dataclass)
 
-The design brief describes `requests` as "`TreeMap[u256, dict]`". GenLayer storage
-**cannot hold a raw Python `dict` as a value type** (the linter flags it `E016`
-and the storage engine cannot lay it out). The lint-clean, deploy-safe equivalent
-is a typed record: `requests: TreeMap[u256, OracleRequest]` using an
-`@allow_storage @dataclass`. The public views project that record back into a
-plain `dict`, so the external interface still returns request dictionaries exactly
-as intended. This is the idiomatic GenLayer pattern for structured per-key state.
+The design brief describes `requests` as "`TreeMap[u256, dict]`" and the views as
+returning `dict`. Neither is deploy-safe in GenLayer:
+
+- **Storage:** the engine **cannot hold a raw Python `dict` as a value type** (the
+  linter flags it `E016` and cannot lay it out). The fix is a typed record —
+  `requests: TreeMap[u256, OracleRequest]` using an `@allow_storage @dataclass`.
+- **Return types:** a public method annotated `-> dict` makes the node emit an
+  untyped ABI entry (`ret: "dict"`), which schema generation rejects with
+  `invalid_contract` in `gen_getContractSchemaForCode` — the contract fails to
+  deploy. The fix is to return typed `@dataclass` structs so the ABI carries a
+  concrete field-by-field shape.
+
+Every public method therefore returns a typed dataclass: `OracleRequest`
+(`get_request`, `resolve_request`), `TrustModel` (`get_trust_model`), and
+`FencePreview` (`preview_fence`). List-valued fields (allowed domains, states) are
+exposed as comma-joined strings, since a struct field must itself be a concrete
+scalar/collection type. This is the idiomatic GenLayer pattern for structured
+state and structured return values.
 
 ---
 
