@@ -41,11 +41,16 @@ from dataclasses import dataclass
 #      Bare JSON floats are rejected at the boundary by `_coerce_bp`, because
 #      floating point is a classic source of validator disagreement.
 #
-#   4. DETERMINISTIC ON-CHAIN EQUIVALENCE
+#   4. COMPLETE-OUTCOME DETERMINISTIC EQUIVALENCE
 #      Given the two integer readings, the contract computes an integer variance
 #      in basis points using pure integer arithmetic and compares it to a caller
-#      supplied threshold. This gate contains no floats, no LLM, and no network
-#      access, so it is trivially reproducible by every validator.
+#      supplied threshold. Crucially the ENTIRE outcome -- both readings, the
+#      final `status` (RESOLVED/REJECTED) and the stored `final_value_bp` -- is
+#      produced inside ONE nondet block and bound by consensus. The Leader and
+#      every Validator independently recompute the whole outcome; `validator_fn`
+#      hard-rejects any run whose status disagrees with the Leader's, so readings
+#      that drift within a per-source tolerance yet straddle the variance
+#      threshold can never yield conflicting RESOLVED/REJECTED commitments.
 #
 # The whole file is 100% clean ASCII English. No non-ASCII characters appear in
 # code, comments, or docstrings.
@@ -258,6 +263,78 @@ def _integer_variance_bp(value_a: int, value_b: int) -> int:
     return (abs(value_a - value_b) * BP_SCALE) // avg
 
 
+def _compute_outcome(value_a_bp: int, value_b_bp: int, max_variance_bp: int) -> dict:
+    """Compute the COMPLETE final outcome from two integer readings.
+
+    Both the Leader and every Validator run this exact function, so it returns
+    everything that is bound by consensus in one shot: the raw readings, the
+    integer variance, the final `status` ("RESOLVED"/"REJECTED"), the stored
+    `final_value_bp`, and the human-readable rejection reason.
+
+    Returning the whole outcome (not just a per-reading integer) is what lets the
+    validator independently recompute and BIND the status and final value. A
+    reading that lands inside a per-source tolerance band but flips the variance
+    gate across `max_variance_bp` can no longer be silently accepted: the status
+    it produces must match the Leader's exactly (see `_outcomes_agree`).
+    """
+    variance_bp = _integer_variance_bp(value_a_bp, value_b_bp)
+    if variance_bp <= max_variance_bp:
+        status = STATUS_RESOLVED
+        final_value_bp = (value_a_bp + value_b_bp) // 2
+        reason = ""
+    else:
+        status = STATUS_REJECTED
+        final_value_bp = 0
+        reason = (
+            "variance " + str(variance_bp) + " bp exceeds threshold "
+            + str(max_variance_bp) + " bp"
+        )
+    return {
+        "value_a_bp": value_a_bp,
+        "value_b_bp": value_b_bp,
+        "variance_bp": variance_bp,
+        "status": status,
+        "final_value_bp": final_value_bp,
+        "reason": reason,
+    }
+
+
+def _outcomes_agree(leader_outcome: object, validator_outcome: dict) -> bool:
+    """Decide whether a Validator's independent outcome binds the Leader's.
+
+    This is the heart of the consensus fix. It enforces TWO conditions:
+
+      1. STATUS BINDING (hard): the Leader and Validator must reach the SAME
+         final status. If the Leader evaluates RESOLVED while the Validator
+         evaluates REJECTED (or vice-versa), the readings straddle the variance
+         threshold and the outcomes are irreconcilable -> return False.
+
+      2. VALUE BINDING (tolerance): when both agree on RESOLVED, the stored
+         `final_value_bp` the Leader is about to commit must match the
+         Validator's independently computed value within VALIDATOR_TOLERANCE_BP.
+         When both agree on REJECTED the stored value is a fixed 0, so status
+         agreement alone is sufficient.
+    """
+    if not isinstance(leader_outcome, dict):
+        return False
+
+    leader_status = leader_outcome.get("status")
+    validator_status = validator_outcome["status"]
+
+    # (1) Status must match exactly -- no RESOLVED-vs-REJECTED splits.
+    if leader_status != validator_status:
+        return False
+
+    # (2) On RESOLVED, bind the exact stored value within tolerance.
+    if leader_status == STATUS_RESOLVED:
+        leader_final = int(leader_outcome.get("final_value_bp", -1))
+        validator_final = int(validator_outcome["final_value_bp"])
+        return abs(leader_final - validator_final) <= VALIDATOR_TOLERANCE_BP
+
+    # Both REJECTED: stored value is a fixed 0, status agreement is enough.
+    return True
+
+
 # ---------------------------------------------------------------------------
 # Typed records
 #
@@ -401,26 +478,24 @@ class MultiSourceEquivalenceOracle(gl.Contract):
                 f"{ERROR_EXPECTED} Request {int(request_id)} is not PENDING (status={status})"
             )
 
-        # Non-deterministic extraction for each source. Each call returns a plain
-        # integer basis-point reading; contract state is untouched inside them.
-        value_a_bp = _resolve_metric_bp(url_a, target_metric)
-        value_b_bp = _resolve_metric_bp(url_b, target_metric)
+        # COMPLETE-OUTCOME CONSENSUS: a single nondet block fetches BOTH sources,
+        # runs the deterministic equivalence gate, and returns the whole outcome
+        # (status + final_value_bp + reason). The Leader computes it; every
+        # Validator independently recomputes it and binds the status and value
+        # (see `_analyze_sources` / `_outcomes_agree`). The status stored below is
+        # therefore the consensus-bound status, never a per-reading range that a
+        # validator could accept while privately disagreeing on RESOLVED/REJECTED.
+        outcome = _analyze_sources(url_a, url_b, target_metric, max_variance_bp)
 
-        # --- DETERMINISTIC ON-CHAIN EQUIVALENCE (no floats, no LLM, no web). ---
-        variance_bp = _integer_variance_bp(value_a_bp, value_b_bp)
-        final_value_bp = (value_a_bp + value_b_bp) // 2
-
-        if variance_bp <= max_variance_bp:
+        status_out = str(outcome["status"])
+        if status_out == STATUS_RESOLVED:
             record.status = STATUS_RESOLVED
-            record.final_value_bp = u256(final_value_bp)
+            record.final_value_bp = u256(int(outcome["final_value_bp"]))
             record.reason = ""
         else:
             record.status = STATUS_REJECTED
             record.final_value_bp = u256(0)
-            record.reason = (
-                "variance " + str(variance_bp) + " bp exceeds threshold "
-                + str(max_variance_bp) + " bp"
-            )
+            record.reason = str(outcome["reason"])
 
         return record
 
@@ -472,39 +547,65 @@ class MultiSourceEquivalenceOracle(gl.Contract):
 # Non-deterministic resolution (module-level so the closures never see `self`)
 # ---------------------------------------------------------------------------
 
-def _resolve_metric_bp(url: str, target_metric: str) -> int:
-    """Fetch `url`, fence its payload, ask the LLM for the metric, return bp int.
+def _fetch_metric_bp(url: str, target_metric: str) -> int:
+    """Fetch `url`, fence its payload, ask the LLM, return an integer bp reading.
 
-    Runs under leader/validator consensus. The leader performs the fetch and LLM
-    extraction; the validator replays the same work and agrees only when its own
-    reading lands within VALIDATOR_TOLERANCE_BP of the leader's reading.
+    Pure per-source extraction with NO consensus wrapper of its own. It is called
+    from inside the shared `_analyze_sources` nondet closure so that BOTH readings
+    and the complete final outcome are produced together under a single
+    leader/validator agreement.
+    """
+    response = gl.nondet.web.get(url)
+    status = response.status
+    if 400 <= status < 500:
+        raise gl.vm.UserError(f"{ERROR_EXTERNAL} {url} returned {status}")
+    if status >= 500:
+        raise gl.vm.UserError(f"{ERROR_TRANSIENT} {url} returned {status}")
+
+    body = response.body if response.body is not None else b""
+    payload = body.decode("utf-8", errors="replace")
+
+    # DYNAMIC SHA-256 PROMPT FENCING happens here, inside the nondet block, over
+    # the freshly fetched payload. No contract state is read.
+    token = _sha256_fence_token(payload)
+    prompt = _build_fenced_prompt(payload, target_metric, token)
+
+    analysis = gl.nondet.exec_prompt(prompt, response_format="json")
+    return _extract_value_bp(analysis)
+
+
+def _analyze_sources(
+    url_a: str,
+    url_b: str,
+    target_metric: str,
+    max_variance_bp: int,
+) -> dict:
+    """Resolve the COMPLETE outcome for both sources under one consensus round.
+
+    A single `run_nondet_unsafe` block fetches source A and source B, runs the
+    deterministic equivalence gate, and returns the whole outcome dict. Because
+    the Leader and the Validator both evaluate the entire outcome:
+
+      * the Validator recomputes `status` and `final_value_bp` independently, and
+      * `validator_fn` returns False whenever the two statuses differ,
+
+    two honest nodes can NEVER commit conflicting RESOLVED/REJECTED decisions.
+    Readings that drift within a per-source tolerance but straddle the request's
+    variance threshold now force a hard disagreement instead of a silent accept.
     """
 
-    def leader_fn() -> int:
-        response = gl.nondet.web.get(url)
-        status = response.status
-        if 400 <= status < 500:
-            raise gl.vm.UserError(f"{ERROR_EXTERNAL} {url} returned {status}")
-        if status >= 500:
-            raise gl.vm.UserError(f"{ERROR_TRANSIENT} {url} returned {status}")
-
-        body = response.body if response.body is not None else b""
-        payload = body.decode("utf-8", errors="replace")
-
-        # DYNAMIC SHA-256 PROMPT FENCING happens here, inside the nondet block,
-        # over the freshly fetched payload. No contract state is read.
-        token = _sha256_fence_token(payload)
-        prompt = _build_fenced_prompt(payload, target_metric, token)
-
-        analysis = gl.nondet.exec_prompt(prompt, response_format="json")
-        return _extract_value_bp(analysis)
+    def leader_fn() -> dict:
+        value_a_bp = _fetch_metric_bp(url_a, target_metric)
+        value_b_bp = _fetch_metric_bp(url_b, target_metric)
+        # DETERMINISTIC ON-CHAIN EQUIVALENCE (no floats, no LLM, no web).
+        return _compute_outcome(value_a_bp, value_b_bp, max_variance_bp)
 
     def validator_fn(leaders_result: gl.vm.Result) -> bool:
         # Deterministic / expected errors must be reproduced exactly.
         if not isinstance(leaders_result, gl.vm.Return):
             leader_message = getattr(leaders_result, "message", "")
             try:
-                validator_value = leader_fn()
+                _ = leader_fn()
             except gl.vm.UserError as err:
                 validator_message = err.message
                 if validator_message.startswith(ERROR_EXPECTED) or validator_message.startswith(
@@ -516,19 +617,18 @@ def _resolve_metric_bp(url: str, target_metric: str) -> int:
                 ):
                     return True
                 return False
-            # Validator succeeded where the leader failed: disagree.
-            _ = validator_value
+            # Validator computed a full outcome where the leader errored: disagree.
             return False
 
-        leader_value = leaders_result.calldata
+        leader_outcome = leaders_result.calldata
         try:
-            validator_value = leader_fn()
+            validator_outcome = leader_fn()
         except gl.vm.UserError:
-            # Leader succeeded, validator failed: disagree and force rotation.
+            # Leader produced an outcome, validator errored: disagree and rotate.
             return False
 
-        if not isinstance(leader_value, int):
-            return False
-        return abs(int(leader_value) - int(validator_value)) <= VALIDATOR_TOLERANCE_BP
+        # COMPLETE-OUTCOME BINDING: identical status is mandatory; on RESOLVED the
+        # stored final value must also match within tolerance.
+        return _outcomes_agree(leader_outcome, validator_outcome)
 
     return gl.vm.run_nondet_unsafe(leader_fn, validator_fn)

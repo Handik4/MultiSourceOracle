@@ -3,6 +3,6 @@
   "network": "StudioNet",
   "chainId": 61999,
   "rpcUrl": "https://studio.genlayer.com/api",
-  "address": "0xbfb9a26914434702812f48F481a9eFc1Cb0eCE2e",
-  "explorer": "https://explorer-studio.genlayer.com/address/0xbfb9a26914434702812f48F481a9eFc1Cb0eCE2e"
+  "address": "0xDC9978a893b93F8B03eD57Fc8854Ae8eA655E28d",
+  "explorer": "https://explorer-studio.genlayer.com/address/0xDC9978a893b93F8B03eD57Fc8854Ae8eA655E28d"
 }

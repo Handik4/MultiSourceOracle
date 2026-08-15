@@ -298,6 +298,119 @@ def test_injection_payload_does_not_alter_deterministic_gate(direct_vm, direct_d
 
 
 # ---------------------------------------------------------------------------
+# Complete-outcome consensus binding (Leader vs Validator)
+#
+# `resolve_request` computes the ENTIRE outcome (status + final_value_bp) inside a
+# single nondet block. The captured `validator_fn` re-runs that block and MUST
+# reject any run whose status disagrees with the Leader's, or whose RESOLVED value
+# drifts beyond tolerance. Direct mode runs only the leader, but gltest captures
+# the validator closure so we can replay it against swapped mocks via
+# `direct_vm.run_validator()`.
+# ---------------------------------------------------------------------------
+
+def test_validator_agrees_when_both_resolve(direct_vm, direct_deploy, direct_alice):
+    contract = direct_deploy(CONTRACT)
+    direct_vm.sender = direct_alice
+
+    body_a = json.dumps({"source": MARKER_A, "v": "100"})
+    body_b = json.dumps({"source": MARKER_B, "v": "100"})
+    _wire_two_sources(direct_vm, body_a, body_b, 1000000, 1000000)
+
+    request_id = contract.create_request(URL_A, URL_B, "price", 50)
+    result = contract.resolve_request(request_id)
+    assert result.status == "RESOLVED"
+
+    # Validator sees the SAME data -> identical RESOLVED outcome -> consensus holds.
+    assert direct_vm.run_validator() is True
+
+
+def test_validator_agrees_when_both_reject(direct_vm, direct_deploy, direct_alice):
+    contract = direct_deploy(CONTRACT)
+    direct_vm.sender = direct_alice
+
+    body_a = json.dumps({"source": MARKER_A, "v": "100"})
+    body_b = json.dumps({"source": MARKER_B, "v": "500"})
+    # variance far exceeds 50 bp -> leader REJECTED.
+    _wire_two_sources(direct_vm, body_a, body_b, 1000000, 5000000)
+
+    request_id = contract.create_request(URL_A, URL_B, "price", 50)
+    result = contract.resolve_request(request_id)
+    assert result.status == "REJECTED"
+
+    # Validator reproduces the REJECTED outcome -> consensus holds (stored value 0).
+    assert direct_vm.run_validator() is True
+
+
+def test_validator_rejects_resolved_vs_rejected_mismatch(direct_vm, direct_deploy, direct_alice):
+    """Leader resolves, but the Validator's independent readings straddle the
+    variance threshold and evaluate to REJECTED. The status mismatch MUST fail
+    consensus rather than silently commit the Leader's RESOLVED."""
+    contract = direct_deploy(CONTRACT)
+    direct_vm.sender = direct_alice
+
+    body_a = json.dumps({"source": MARKER_A, "v": "100"})
+    body_b = json.dumps({"source": MARKER_B, "v": "100"})
+    # Leader: identical readings -> RESOLVED.
+    _wire_two_sources(direct_vm, body_a, body_b, 1000000, 1000000)
+
+    request_id = contract.create_request(URL_A, URL_B, "price", 50)
+    result = contract.resolve_request(request_id)
+    assert result.status == "RESOLVED"
+
+    # Swap the LLM readings the VALIDATOR will see: now wildly divergent -> the
+    # validator recomputes REJECTED. Leader RESOLVED vs Validator REJECTED.
+    direct_vm.clear_mocks()
+    _wire_two_sources(direct_vm, body_a, body_b, 1000000, 5000000)
+
+    assert direct_vm.run_validator() is False
+
+
+def test_validator_rejects_rejected_vs_resolved_mismatch(direct_vm, direct_deploy, direct_alice):
+    """The mirror case: Leader REJECTED, Validator RESOLVED -> consensus fails."""
+    contract = direct_deploy(CONTRACT)
+    direct_vm.sender = direct_alice
+
+    body_a = json.dumps({"source": MARKER_A, "v": "100"})
+    body_b = json.dumps({"source": MARKER_B, "v": "500"})
+    # Leader: divergent readings -> REJECTED.
+    _wire_two_sources(direct_vm, body_a, body_b, 1000000, 5000000)
+
+    request_id = contract.create_request(URL_A, URL_B, "price", 50)
+    result = contract.resolve_request(request_id)
+    assert result.status == "REJECTED"
+
+    # Validator now sees agreeing readings -> recomputes RESOLVED. Mismatch fails.
+    direct_vm.clear_mocks()
+    _wire_two_sources(direct_vm, body_a, body_b, 1000000, 1000000)
+
+    assert direct_vm.run_validator() is False
+
+
+def test_validator_rejects_resolved_value_out_of_tolerance(direct_vm, direct_deploy, direct_alice):
+    """Both agree on RESOLVED, but the Validator's stored final_value_bp drifts
+    beyond VALIDATOR_TOLERANCE_BP (25) from the Leader's -> consensus fails."""
+    contract = direct_deploy(CONTRACT)
+    direct_vm.sender = direct_alice
+
+    body_a = json.dumps({"source": MARKER_A, "v": "100"})
+    body_b = json.dumps({"source": MARKER_B, "v": "100"})
+    # Leader: final_value_bp == 1000000, variance 0 -> RESOLVED.
+    _wire_two_sources(direct_vm, body_a, body_b, 1000000, 1000000)
+
+    request_id = contract.create_request(URL_A, URL_B, "price", 50)
+    result = contract.resolve_request(request_id)
+    assert result.status == "RESOLVED"
+    assert result.final_value_bp == 1000000
+
+    # Validator still RESOLVED (variance ~0 <= 50) but averages to 1000100, which
+    # is 100 bp away from the leader's 1000000 -> beyond the 25 bp tolerance.
+    direct_vm.clear_mocks()
+    _wire_two_sources(direct_vm, body_a, body_b, 1000000, 1000200)
+
+    assert direct_vm.run_validator() is False
+
+
+# ---------------------------------------------------------------------------
 # Trust model view
 # ---------------------------------------------------------------------------
 

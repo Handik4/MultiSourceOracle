@@ -23,8 +23,8 @@ patterns that every serious GenLayer oracle needs:
 | Field | Value |
 |-------|-------|
 | Network | GenLayer StudioNet (Chain `61999`) |
-| Contract address | `0xbfb9a26914434702812f48F481a9eFc1Cb0eCE2e` |
-| Explorer | https://explorer-studio.genlayer.com/address/0xbfb9a26914434702812f48F481a9eFc1Cb0eCE2e |
+| Contract address | `0xDC9978a893b93F8B03eD57Fc8854Ae8eA655E28d` |
+| Explorer | https://explorer-studio.genlayer.com/address/0xDC9978a893b93F8B03eD57Fc8854Ae8eA655E28d |
 
 Machine-readable deployment metadata is recorded in
 [`deployments/studionet.json`](deployments/studionet.json).
